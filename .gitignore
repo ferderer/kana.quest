@@ -1,0 +1,22 @@
+# Angular
+/angular/node_modules/
+/angular/dist/
+/angular/.angular/
+
+# mobile
+/mobile/node_modules/
+/mobile/dist/
+/mobile/.angular/
+
+# Java/Spring Boot
+/spring/target/
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+
+# Misc
+*.log
+.DS_Store
+/backend/spring/target/
