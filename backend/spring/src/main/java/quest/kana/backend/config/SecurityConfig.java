@@ -11,17 +11,20 @@ import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
 import java.io.IOException;
 import java.time.Duration;
-import java.util.Arrays;
 import java.util.List;
+import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.core.AuthorizationGrantType;
 import org.springframework.security.oauth2.core.ClientAuthenticationMethod;
 import org.springframework.security.oauth2.core.oidc.OidcScopes;
@@ -35,11 +38,13 @@ import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter;
 import org.springframework.security.web.header.writers.XXssProtectionHeaderWriter;
 import org.springframework.web.cors.CorsConfiguration;
-import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+import quest.kana.backend.domain.auth.model.jpa.LoginRepository;
+import quest.kana.backend.support.auth.RateLimitingJpaAuthenticationProvider;
 
 @Configuration
 @EnableWebSecurity
+@RequiredArgsConstructor
 public class SecurityConfig {
 
     @Value("${ui.url}")
@@ -47,6 +52,8 @@ public class SecurityConfig {
 
     @Value("${self.url}")
     private String selfUrl;
+
+    private final LoginRepository loginRepository;
 
     @Bean
     @Order(0)
@@ -58,12 +65,18 @@ public class SecurityConfig {
             .securityContext(sc -> sc.disable())
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .csrf(csrf -> csrf.disable())
-            .cors(cors -> cors.disable())
-            .headers(headers -> headers
-                .contentSecurityPolicy(csp -> csp.policyDirectives("default-src 'self'; script-src 'none'; style-src 'self'; img-src 'self' data:;"))
-                .referrerPolicy(r -> r.policy(ReferrerPolicyHeaderWriter.ReferrerPolicy.NO_REFERRER))
-                .contentTypeOptions(Customizer.withDefaults())
-            )
+            .cors(cors -> {
+                CorsConfiguration configuration = new CorsConfiguration();
+                configuration.setAllowedOrigins(List.of(uiUrl));
+                configuration.setAllowedHeaders(List.of("Accept", "Cache-Control", "If-Modified-Since"));
+                configuration.setAllowedMethods(List.of("GET", "HEAD", "OPTIONS"));
+                configuration.setAllowCredentials(false);
+                configuration.setMaxAge(3600L);
+
+                UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+                source.registerCorsConfiguration("/**", configuration);
+                cors.configurationSource(source);
+            })
             .build();
     }
 
@@ -72,9 +85,20 @@ public class SecurityConfig {
     public SecurityFilterChain oauth2SecurityFilterChain(HttpSecurity http) throws Exception {
         return http
             .securityMatcher("/.well-known/**", "/oauth2/**", "/userinfo", "/connect/logout", "/login", "/default-ui.css")
-            .cors(c -> c.configurationSource(corsConfigurationSource()))
+            .cors(cors -> {
+                CorsConfiguration configuration = new CorsConfiguration();
+                configuration.setAllowedOrigins(List.of(uiUrl));
+                configuration.setAllowedHeaders(List.of("Accept", "Content-Type", "Authorization", "X-Requested-With", "Cookie"));
+                configuration.setAllowedMethods(List.of("GET", "POST", "OPTIONS"));
+                configuration.setAllowCredentials(true); // Required for OAuth flows
+                configuration.setMaxAge(1800L); // 30 minutes cache
+
+                UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+                source.registerCorsConfiguration("/**", configuration);
+                cors.configurationSource(source);
+            })
             .headers(headers -> headers
-                .contentSecurityPolicy(csp -> csp.policyDirectives("default-src 'none';form-action 'self';style-src 'self';base-uri 'self';frame-ancestors 'none';"))
+                .contentSecurityPolicy(csp -> csp.policyDirectives("script-source 'none';form-action 'self';style-src 'self';base-uri 'self';frame-ancestors 'none';"))
                 .frameOptions(frame -> frame.deny())
                 .referrerPolicy(r -> r.policy(ReferrerPolicyHeaderWriter.ReferrerPolicy.SAME_ORIGIN))
                 .permissionsPolicyHeader(p -> p.policy("geolocation=(), microphone=(), camera=()"))
@@ -85,6 +109,7 @@ public class SecurityConfig {
                     .maxAgeInSeconds(31536000)
                 )
             )
+            .authenticationProvider(authenticationProvider())
             .authorizeHttpRequests(registry -> registry
                 .requestMatchers("/.well-known/**", "/oauth2/jwks", "/login", "/default-ui.css").permitAll()
                 .anyRequest().authenticated()
@@ -103,7 +128,18 @@ public class SecurityConfig {
         return http
             .securityMatcher("/api/**", "/error")
             .csrf(csrf -> csrf.disable())
-            .cors(c -> c.configurationSource(corsConfigurationSource()))
+            .cors(cors -> {
+                CorsConfiguration configuration = new CorsConfiguration();
+                configuration.setAllowedOrigins(List.of(uiUrl));
+                configuration.setAllowedHeaders(List.of("Accept", "Content-Type", "Authorization", "X-Requested-With", "Cache-Control"));
+                configuration.setAllowedMethods(List.of("POST", "OPTIONS"));
+                configuration.setAllowCredentials(true);
+                configuration.setMaxAge(1800L);
+
+                UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+                source.registerCorsConfiguration("/api/**", configuration);
+                cors.configurationSource(source);
+            })
             .headers(customizer -> customizer
                 .xssProtection(xss -> xss.disable()) // irrelevant for JSON
                 .contentTypeOptions(Customizer.withDefaults()) // adds X-Content-Type-Options: nosniff
@@ -159,15 +195,13 @@ public class SecurityConfig {
         )));
     }
 
-    private CorsConfigurationSource corsConfigurationSource() {
-        CorsConfiguration configuration = new CorsConfiguration();
-        configuration.setAllowedOrigins(List.of(uiUrl));
-        configuration.setAllowedHeaders(List.of("*"));
-        configuration.setAllowedMethods(Arrays.asList("GET","POST","OPTIONS"));
-        configuration.setAllowCredentials(true);
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
 
-        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-        source.registerCorsConfiguration("/**", configuration);
-        return source;
+    @Bean
+    public AuthenticationProvider authenticationProvider() {
+        return new RateLimitingJpaAuthenticationProvider(loginRepository, passwordEncoder());
     }
 }
