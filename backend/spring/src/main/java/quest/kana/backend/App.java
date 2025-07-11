@@ -1,4 +1,4 @@
-package quest.kana.backend.spring;
+package quest.kana.backend;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
